@@ -156,12 +156,11 @@ status_update() {
 timedatectl set-ntp true >/dev/null 2>&1 || true
 
 # Сбрасываем старые правила перехвата трафика (если скрипт запускается повторно).
-# Без этого iptables-правила от прошлого запуска блокируют HTTPS-запросы сервера,
-# если sing-box не работает (например, после падения из-за плохого конфига).
-iptables -t nat -D OUTPUT -p tcp -m owner --uid-owner sing-box -j RETURN 2>/dev/null || true
-iptables -t nat -D OUTPUT -p tcp -m multiport --dports 80,443 -j REDIRECT --to-ports 12345 2>/dev/null || true
-iptables -t nat -D PREROUTING -p tcp -m multiport --dports 80,443 -j REDIRECT --to-ports 12345 2>/dev/null || true
-iptables -D FORWARD -p udp --dport 443 -j REJECT 2>/dev/null || true
+# Полный сброс цепочек надёжнее точечного -D, т.к. правила могут накапливаться.
+iptables -t nat -F OUTPUT 2>/dev/null || true
+iptables -t nat -F PREROUTING 2>/dev/null || true
+iptables -F FORWARD 2>/dev/null || true
+# Также убираем правило блокировки QUIC из OUTPUT
 iptables -D OUTPUT -p udp --dport 443 -j REJECT 2>/dev/null || true
 
 # 1. Установка системных зависимостей
