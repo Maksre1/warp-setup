@@ -1,0 +1,458 @@
+#!/usr/bin/env bash
+
+# ==============================================================================
+# 🚀 VPS Auto-WARP & Optimization Configurator (v1.0)
+# Разблокировка нейросетей на вашем сервере (Gemini, ChatGPT, Claude)
+# ==============================================================================
+
+# Цвета для красивого вывода в терминал
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[0;33m'
+BLUE='\033[0;34m'
+NC='\033[0m' # No Color
+
+clear
+
+# Приветственный экран
+echo -e "${BLUE}=========================================================${NC}"
+echo -e "   🚀  ${GREEN}VPS Auto-WARP Configurator (v1.0)${NC}"
+echo -e "   Разблокировка нейросетей на вашем сервере"
+echo -e "   (Gemini, ChatGPT, Claude)"
+echo -e "${BLUE}=========================================================${NC}"
+echo ""
+echo -e "Этот скрипт настроит маршрутизацию трафика нейросетей через"
+echo -e "сеть Cloudflare WARP на вашем сервере. Остальной трафик"
+echo -e "продолжит работать напрямую через ваш основной IP."
+echo ""
+echo -e "• Совместимо с AmneziaVPN и 3x-ui (Xray)."
+echo -e "• Скрипт выполняется на вашем компьютере и никуда не"
+echo -e "  передает ваши данные. В целях безопасности вы можете"
+echo -e "  сменить пароль от VPS в личном кабинете хостинга"
+echo -e "  сразу после завершения настройки."
+echo ""
+
+# Запрос согласия
+read -p "Вы согласны продолжить настройку? [y/N]: " confirm
+if [[ ! "$confirm" =~ ^[yY]$ ]]; then
+    echo -e "\n${YELLOW}Настройка отменена.${NC}\n"
+    exit 0
+fi
+
+echo -e "\n---------------------------------------------------------"
+echo -e "Укажите параметры подключения к вашему VPS-серверу:"
+echo -e "---------------------------------------------------------"
+
+# Запрос данных для подключения
+read -p "[?] IP-адрес сервера (например, 185.12.34.56): " VPS_IP
+if [ -z "$VPS_IP" ]; then
+    echo -e "${RED}Ошибка: IP-адрес не может быть пустым.${NC}"
+    exit 1
+fi
+
+# Порт по умолчанию 22
+read -p "[?] SSH-порт сервера [22]: " VPS_PORT
+VPS_PORT=${VPS_PORT:-22}
+
+# Пользователь по умолчанию root
+read -p "[?] Имя пользователя SSH [root]: " VPS_USER
+VPS_USER=${VPS_USER:-root}
+
+echo -e "\n[i] Подключаемся к $VPS_IP..."
+
+# Проверка доступности порта перед запуском SSH
+if ! nc -z -w3 "$VPS_IP" "$VPS_PORT" 2>/dev/null; then
+    # Fallback на bash-only проверку порта, если nc отсутствует
+    if ! exec 3<>/dev/tcp/"$VPS_IP"/"$VPS_PORT" 2>/dev/null; then
+        echo -e "${RED}[✗] Ошибка подключения! Сервер $VPS_IP на порту $VPS_PORT недоступен.${NC}"
+        echo -e "    Убедитесь, что IP-адрес и порт введены верно.\n"
+        exit 1
+    fi
+    exec 3>&-
+fi
+
+# Подготовка скрипта для выполнения на стороне сервера
+# Этот блок команд передается в удаленный shell
+REMOTE_SCRIPT=$(cat << 'EOF'
+set -e
+export DEBIAN_FRONTEND=noninteractive
+
+# Функция для обновления статуса на удаленной стороне
+status_update() {
+    echo "PROGRESS:$1:$2"
+}
+
+# Синхронизация времени сервера (критично для WireGuard/WARP handshakes)
+timedatectl set-ntp true >/dev/null 2>&1 || true
+
+# 1. Установка системных зависимостей
+status_update 20 "Установка компонентов"
+if [ -f /etc/debian_version ]; then
+    apt-get update -y >/dev/null 2>&1
+    apt-get install -y curl jq iptables iptables-persistent >/dev/null 2>&1
+elif [ -f /etc/redhat-release ]; then
+    yum install -y curl jq iptables iptables-services >/dev/null 2>&1
+    if ! command -v jq &> /dev/null; then
+        yum install -y epel-release >/dev/null 2>&1
+        yum install -y jq >/dev/null 2>&1
+    fi
+else
+    echo "ERROR: Неподдерживаемая ОС на сервере"
+    exit 1
+fi
+
+# 2. Установка sing-box
+status_update 40 "Настройка WARP"
+if [ -f /etc/debian_version ]; then
+    curl -fsSL https://sing-box.app/deb-install.sh | bash >/dev/null 2>&1
+elif [ -f /etc/redhat-release ]; then
+    curl -fsSL https://sing-box.app/rpm-install.sh | bash >/dev/null 2>&1
+fi
+
+# Создаем папку под конфиг, если нет
+mkdir -p /etc/sing-box
+
+# Генерируем ключи WireGuard
+keys=$(sing-box generate wg-keypair)
+private_key=$(echo "$keys" | awk '/Private key:/{print $3}')
+public_key=$(echo "$keys" | awk '/Public key:/{print $3}')
+
+# Регистрация WARP через python-скрипт
+warp_info=$(python3 -c "
+import urllib.request, json, base64
+try:
+    req = urllib.request.Request(
+        'https://api.cloudflareclient.com/v0a2158/reg',
+        data=json.dumps({
+            'install_id': '', 'tos': '2020-09-01T00:00:00.000Z',
+            'key': '$public_key', 'fcm_token': '', 'type': 'Android', 'locale': 'en_US'
+        }).encode('utf-8'),
+        headers={'Content-Type': 'application/json'}
+    )
+    with urllib.request.urlopen(req) as resp:
+        res = json.loads(resp.read().decode('utf-8'))
+        cfg = res['config']
+        print(json.dumps({
+            'ip4': cfg['interface']['addresses']['v4'],
+            'ip6': cfg['interface']['addresses']['v6'],
+            'reserved': list(base64.b64decode(cfg.get('client_id', ''))) if cfg.get('client_id') else [0,0,0]
+        }))
+except Exception as e:
+    import sys
+    print(f'ERROR:{e}', file=sys.stderr)
+    sys.exit(1)
+" 2>&1)
+
+if [[ "$warp_info" == ERROR:* ]]; then
+    echo "$warp_info"
+    exit 1
+fi
+
+warp_ip4=$(echo "$warp_info" | jq -r '.ip4')
+warp_ip6=$(echo "$warp_info" | jq -r '.ip6')
+warp_reserved=$(echo "$warp_info" | jq -c '.reserved')
+
+# Запись конфига sing-box (с интеграцией DNS-over-HTTPS и TCP Fast Open)
+cat << SECONF > /etc/sing-box/config.json
+{
+  "log": {
+    "level": "warning"
+  },
+  "dns": {
+    "servers": [
+      {
+        "tag": "dns-remote",
+        "address": "https://1.1.1.1/dns-query",
+        "detour": "warp"
+      },
+      {
+        "tag": "dns-local",
+        "address": "8.8.8.8",
+        "detour": "direct"
+      }
+    ],
+    "rules": [
+      {
+        "domain_suffix": [
+          "google.com",
+          "googleapis.com",
+          "gstatic.com",
+          "googleusercontent.com",
+          "openai.com",
+          "chatgpt.com",
+          "oaistatic.com",
+          "oaiusercontent.com",
+          "anthropic.com",
+          "claude.ai",
+          "challenges.cloudflare.com"
+        ],
+        "server": "dns-remote"
+      }
+    ],
+    "final": "dns-local"
+  },
+  "inbounds": [
+    {
+      "type": "redirect",
+      "tag": "redirect-in",
+      "listen": "0.0.0.0",
+      "listen_port": 12345,
+      "sniff": true,
+      "sniff_override_destination": true
+    }
+  ],
+  "outbounds": [
+    {
+      "type": "direct",
+      "tag": "direct",
+      "tcp_fast_open": true
+    },
+    {
+      "type": "wireguard",
+      "tag": "warp",
+      "server": "engage.cloudflareclient.com",
+      "server_port": 2408,
+      "local_address": [
+        "$warp_ip4",
+        "$warp_ip6"
+      ],
+      "private_key": "$private_key",
+      "peer_public_key": "bmXOC+F1FxEMF9dyiK2H5/1SUtzH0JuVo51h2wPfgyo=",
+      "reserved": $warp_reserved,
+      "mtu": 1280
+    },
+    {
+      "type": "dns",
+      "tag": "dns-out"
+    }
+  ],
+  "route": {
+    "rules": [
+      {
+        "protocol": "dns",
+        "outbound": "dns-out"
+      },
+      {
+        "domain_suffix": [
+          "google.com",
+          "googleapis.com",
+          "gstatic.com",
+          "googleusercontent.com",
+          "openai.com",
+          "chatgpt.com",
+          "oaistatic.com",
+          "oaiusercontent.com",
+          "anthropic.com",
+          "claude.ai",
+          "challenges.cloudflare.com"
+        ],
+        "outbound": "warp"
+      },
+      {
+        "outbound": "direct"
+      }
+    ]
+  }
+}
+SECONF
+
+# Настройка системных лимитов файлов LimitNOFILE для службы sing-box
+mkdir -p /etc/systemd/system/sing-box.service.d
+cat << SYSTEMDOVER > /etc/systemd/system/sing-box.service.d/override.conf
+[Service]
+LimitNOFILE=1048576
+SYSTEMDOVER
+
+# Перезапуск sing-box
+systemctl daemon-reload
+systemctl enable sing-box >/dev/null 2>&1
+systemctl restart sing-box
+
+# 3. Оптимизация системы (BBR + TCP + скрытие пинга)
+status_update 60 "Оптимизация"
+
+# Динамический расчет ресурсов RAM
+total_mem_kb=$(grep MemTotal /proc/meminfo | awk '{print $2}')
+if [ "$total_mem_kb" -le 1500000 ]; then
+    # RAM <= 1.5 GB
+    tcp_rmem="4096 87380 4194304"
+    tcp_wmem="4096 65536 4194304"
+    somaxconn="2048"
+    file_max="100000"
+elif [ "$total_mem_kb" -le 4500000 ]; then
+    # RAM 1.5 GB - 4.5 GB
+    tcp_rmem="4096 87380 8388608"
+    tcp_wmem="4096 65536 8388608"
+    somaxconn="8192"
+    file_max="300000"
+else
+    # RAM > 4.5 GB
+    tcp_rmem="4096 87380 16777216"
+    tcp_wmem="4096 65536 16777216"
+    somaxconn="65535"
+    file_max="1000000"
+fi
+
+# Проверяем поддержку BBR ядром и виртуализацией
+bbr_supported=0
+if sysctl net.ipv4.tcp_allowed_congestion_control 2>/dev/null | grep -q "bbr" || modprobe tcp_bbr 2>/dev/null; then
+    bbr_supported=1
+fi
+
+# Пишем оптимизации в sysctl
+cat << SYSCONF > /etc/sysctl.d/99-server-optimization.conf
+# TCP Buffer sizes
+net.ipv4.tcp_rmem=$tcp_rmem
+net.ipv4.tcp_wmem=$tcp_wmem
+
+# File descriptors and connections limits
+fs.file-max=$file_max
+net.core.somaxconn=$somaxconn
+net.core.netdev_max_backlog=100000
+
+# Security: Ignore all ping requests from bots
+net.ipv4.icmp_echo_ignore_all=1
+
+# TCP optimizations
+net.ipv4.tcp_fastopen=3
+net.ipv4.tcp_keepalive_time=600
+net.ipv4.tcp_keepalive_intvl=15
+net.ipv4.tcp_keepalive_probes=5
+SYSCONF
+
+if [ "$bbr_supported" -eq 1 ]; then
+    cat << BBRCONF >> /etc/sysctl.d/99-server-optimization.conf
+# BBR Congestion Control
+net.core.default_qdisc=fq
+net.ipv4.tcp_congestion_control=bbr
+BBRCONF
+fi
+
+# Применяем настройки sysctl (|| true защищает от сбоев на OpenVZ/LXC контейнерах)
+sysctl --system >/dev/null 2>&1 || true
+
+# 4. Настройка файрвола (iptables)
+status_update 80 "Настройка файрвола"
+
+# Очистим старые правила перехвата для sing-box (если переустановка)
+iptables -t nat -D PREROUTING -p tcp -m multiport --dports 80,443 -j REDIRECT --to-ports 12345 2>/dev/null || true
+iptables -t nat -D OUTPUT -p tcp -m owner --uid-owner sing-box -j RETURN 2>/dev/null || true
+iptables -t nat -D OUTPUT -p tcp -m multiport --dports 80,443 -j REDIRECT --to-ports 12345 2>/dev/null || true
+iptables -D FORWARD -p udp --dport 443 -j REJECT 2>/dev/null || true
+iptables -D OUTPUT -p udp --dport 443 -j REJECT 2>/dev/null || true
+
+# Добавляем новые правила
+# Перехват локального трафика на порты 80,443 (кроме самого sing-box)
+iptables -t nat -A OUTPUT -p tcp -m owner --uid-owner sing-box -j RETURN
+iptables -t nat -A OUTPUT -p tcp -m multiport --dports 80,443 -j REDIRECT --to-ports 12345
+# Перехват входящего трафика от докеров (AmneziaVPN)
+iptables -t nat -A PREROUTING -p tcp -m multiport --dports 80,443 -j REDIRECT --to-ports 12345
+
+# Блокировка QUIC (чтобы форсировать падение на TCP)
+iptables -A FORWARD -p udp --dport 443 -j REJECT
+iptables -A OUTPUT -p udp --dport 443 -j REJECT
+
+# Сохранение правил iptables для автозапуска
+if [ -f /etc/debian_version ]; then
+    netfilter-persistent save >/dev/null 2>&1 || iptables-save > /etc/iptables/rules.v4
+elif [ -f /etc/redhat-release ]; then
+    service iptables save >/dev/null 2>&1 || iptables-save > /etc/sysconfig/iptables
+fi
+
+status_update 100 "Завершение настройки"
+EOF
+)
+
+# Функция для вывода прогресс-бара
+draw_progress_bar() {
+    local percent=$1
+    local text=$2
+    local bar_length=20
+    local filled_length=$(( percent * bar_length / 100 ))
+    local unfilled_length=$(( bar_length - filled_length ))
+    
+    local bar=""
+    for ((i=0; i<filled_length; i++)); do bar="${bar}█"; done
+    for ((i=0; i<unfilled_length; i++)); do bar="${bar}░"; done
+    
+    # Очистка строки и вывод нового прогресс-бара
+    printf "\r[i] Выполняется настройка и оптимизация сервера...\n"
+    printf "\r[${bar}] ${percent}%% (${text})"
+    # Возвращаемся на строку выше для красивого обновления
+    printf "\033[A"
+}
+
+# Запуск SSH соединения и выполнение команд с отслеживанием прогресса
+error_occurred=0
+ssh_connected=0
+
+# Временный именованный канал для сбора прогресса
+FIFO_FILE="/tmp/warp_ssh_progress_$$"
+mkfifo "$FIFO_FILE"
+
+# Запускаем SSH в фоновом режиме, перенаправляя вывод в FIFO
+ssh -o ConnectTimeout=10 -o StrictHostKeyChecking=no -p "$VPS_PORT" "$VPS_USER@$VPS_IP" "bash -s" << REMOTE_EOF > "$FIFO_FILE" 2>&1 &
+$REMOTE_SCRIPT
+REMOTE_EOF
+
+SSH_PID=$!
+
+# Читаем FIFO и выводим прогресс-бар
+while IFS= read -r line; do
+    # Проверяем успешность подключения (если вывод не содержит ошибок SSH)
+    if [[ "$line" == *"password"* ]] || [[ "$line" == *"Permission denied"* ]] || [[ "$line" == *"Connection timed out"* ]] || [[ "$line" == *"Connection refused"* ]]; then
+        error_occurred=1
+        err_msg="$line"
+    elif [[ "$line" == PROGRESS:* ]]; then
+        if [ "$ssh_connected" -eq 0 ]; then
+            ssh_connected=1
+            echo -e "${GREEN}[✓] Успешное подключение к серверу $VPS_IP!${NC}\n"
+        fi
+        # Парсим PROGRESS:процент:описание
+        percent=$(echo "$line" | cut -d':' -f2)
+        text=$(echo "$line" | cut -d':' -f3)
+        draw_progress_bar "$percent" "$text"
+    elif [[ "$line" == ERROR:* ]]; then
+        error_occurred=1
+        err_msg=$(echo "$line" | cut -d':' -f2-)
+    fi
+done < "$FIFO_FILE"
+
+# Ждем завершения фонового процесса SSH
+wait $SSH_PID 2>/dev/null
+ssh_status=$?
+
+rm -f "$FIFO_FILE"
+
+# Обработка результатов установки
+if [ "$ssh_status" -ne 0 ] || [ "$error_occurred" -ne 0 ]; then
+    echo -e "\n\n${RED}[✗] Ошибка подключения или установки!${NC}"
+    if [ -n "$err_msg" ]; then
+        echo -e "    Детали: ${YELLOW}$err_msg${NC}"
+    else
+        echo -e "    Убедитесь, что IP-адрес, порт, имя пользователя и пароль введены верно."
+    fi
+    echo ""
+    exit 1
+fi
+
+# Сдвигаемся вниз после прогресс-бара
+printf "\n\n"
+
+# Финальный баннер
+echo -e "${BLUE}=========================================================${NC}"
+echo -e "   🎉  ${GREEN}НАСТРОЙКА УСПЕШНО ЗАВЕРШЕНА!${NC}"
+echo -e "${BLUE}=========================================================${NC}"
+echo ""
+echo -e "Все службы настроены и запущены."
+echo -e "${GREEN}Приятного использования!${NC}"
+echo ""
+echo -e "${YELLOW}💡 РЕКОМЕНДАЦИЯ ПО БЕЗОПАСНОСТИ:${NC}"
+echo -e "   Поскольку настройка завершена, мы рекомендуем зайти"
+echo -e "   в личный кабинет вашего VPS-хостинга и сменить пароль"
+echo -e "   от сервера."
+echo ""
+echo -e "${BLUE}=========================================================${NC}"
+read -n 1 -s -r -p "Для выхода нажмите любую клавишу..."
+echo ""
+exit 0
