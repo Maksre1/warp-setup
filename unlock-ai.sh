@@ -182,45 +182,45 @@ fi
 # Создаем папку под конфиг, если нет
 mkdir -p /etc/sing-box
 
-# Генерируем ключи WireGuard
-keys=$(sing-box generate wg-keypair)
-private_key=$(echo "$keys" | awk '/Private key:/{print $3}')
-public_key=$(echo "$keys" | awk '/Public key:/{print $3}')
+# Регистрация WARP через wgcf (поддерживаемый CLI, всегда актуальный API)
+status_update 40 "Настройка WARP"
 
-# Регистрация WARP через python-скрипт
-warp_info=$(python3 -c "
-import urllib.request, json, base64
-try:
-    req = urllib.request.Request(
-        'https://api.cloudflareclient.com/v0a2158/reg',
-        data=json.dumps({
-            'install_id': '', 'tos': '2020-09-01T00:00:00.000Z',
-            'key': '$public_key', 'fcm_token': '', 'type': 'Android', 'locale': 'en_US'
-        }).encode('utf-8'),
-        headers={'Content-Type': 'application/json'}
-    )
-    with urllib.request.urlopen(req) as resp:
-        res = json.loads(resp.read().decode('utf-8'))
-        cfg = res['config']
-        print(json.dumps({
-            'ip4': cfg['interface']['addresses']['v4'],
-            'ip6': cfg['interface']['addresses']['v6'],
-            'reserved': list(base64.b64decode(cfg.get('client_id', ''))) if cfg.get('client_id') else [0,0,0]
-        }))
-except Exception as e:
-    import sys
-    print(f'ERROR:{e}', file=sys.stderr)
-    sys.exit(1)
-" 2>&1)
+# Определяем архитектуру сервера
+ARCH=$(uname -m)
+case $ARCH in
+    x86_64)  WGCF_ARCH="amd64" ;;
+    aarch64|arm64) WGCF_ARCH="arm64" ;;
+    armv7l)  WGCF_ARCH="armv7" ;;
+    *) echo "ERROR: Неподдерживаемая архитектура: $ARCH"; exit 1 ;;
+esac
 
-if [[ "$warp_info" == ERROR:* ]]; then
-    echo "$warp_info"
-    exit 1
+# Скачиваем wgcf
+WGCF_VER="2.2.26"
+curl -fsSL "https://github.com/ViRb3/wgcf/releases/download/v${WGCF_VER}/wgcf_${WGCF_VER}_linux_${WGCF_ARCH}" \
+    -o /tmp/wgcf >/dev/null 2>&1
+chmod +x /tmp/wgcf
+
+# Регистрируем бесплатное устройство WARP
+cd /tmp
+/tmp/wgcf register --accept-tos >/dev/null 2>&1
+/tmp/wgcf generate >/dev/null 2>&1
+
+# Парсим WireGuard-профиль
+private_key=$(awk '/^PrivateKey/{print $3}' /tmp/wgcf-profile.conf)
+warp_ip4="$(awk '/^Address/{print $3}' /tmp/wgcf-profile.conf | grep -v ':' | head -1)"
+warp_ip6="$(awk '/^Address/{print $3}' /tmp/wgcf-profile.conf | grep ':' | head -1)"
+
+# Получаем reserved байты из account-файла (нужны для handshake с Cloudflare)
+client_id=$(grep 'client_id' /tmp/wgcf-account.toml 2>/dev/null | awk -F'"' '{print $2}' || true)
+if [ -n "$client_id" ]; then
+    warp_reserved=$(python3 -c "import base64,json; b=base64.b64decode('$client_id'); print(json.dumps(list(b[:3])))" 2>/dev/null || echo "[0,0,0]")
+else
+    warp_reserved="[0,0,0]"
 fi
 
-warp_ip4=$(echo "$warp_info" | jq -r '.ip4')
-warp_ip6=$(echo "$warp_info" | jq -r '.ip6')
-warp_reserved=$(echo "$warp_info" | jq -c '.reserved')
+# Убираем временные файлы wgcf
+rm -f /tmp/wgcf /tmp/wgcf-account.toml /tmp/wgcf-profile.conf
+cd /
 
 # Запись конфига sing-box (с интеграцией DNS-over-HTTPS и TCP Fast Open)
 cat << SECONF > /etc/sing-box/config.json
