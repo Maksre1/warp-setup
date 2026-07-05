@@ -83,11 +83,6 @@ export DEBIAN_FRONTEND=noninteractive
 
 status_update() { echo "PROGRESS:$1:$2"; }
 
-if [[ $EUID -ne 0 ]]; then
-   echo "ERROR:Пожалуйста, используйте пользователя root для подключения."
-   exit 1
-fi
-
 status_update 10 "Оптимизация сетевого стека..."
 cat > /etc/sysctl.d/99-ai-optimization.conf << SYSCTL_EOF
 net.core.default_qdisc=fq
@@ -203,8 +198,16 @@ FIFO_FILE="/tmp/warp_ssh_progress_$$"
 mkfifo "$FIFO_FILE"
 printf '%s\n' "$REMOTE_SCRIPT" > "$TMP_SCRIPT"
 
-SSHPASS="$VPS_PASS" "$SSHPASS_BIN" -e ssh -o ConnectTimeout=10 -o StrictHostKeyChecking=no -p "$VPS_PORT" "$VPS_USER@$VPS_IP" "bash -s" < "$TMP_SCRIPT" > "$FIFO_FILE" 2>&1 &
-SSH_PID=$!
+if [ "$VPS_USER" == "root" ]; then
+    SSHPASS="$VPS_PASS" "$SSHPASS_BIN" -e ssh -o ConnectTimeout=10 -o StrictHostKeyChecking=no -p "$VPS_PORT" "$VPS_USER@$VPS_IP" "bash -s" < "$TMP_SCRIPT" > "$FIFO_FILE" 2>&1 &
+    SSH_PID=$!
+else
+    # Для пользователей вроде ubuntu: загружаем скрипт, затем исполняем через sudo
+    SSHPASS="$VPS_PASS" "$SSHPASS_BIN" -e ssh -o ConnectTimeout=10 -o StrictHostKeyChecking=no -p "$VPS_PORT" "$VPS_USER@$VPS_IP" "cat > /tmp/ai_setup_$$.sh" < "$TMP_SCRIPT"
+    SSHPASS="$VPS_PASS" "$SSHPASS_BIN" -e ssh -o ConnectTimeout=10 -o StrictHostKeyChecking=no -p "$VPS_PORT" "$VPS_USER@$VPS_IP" "sudo -S bash /tmp/ai_setup_$$.sh; rm -f /tmp/ai_setup_$$.sh" <<< "$VPS_PASS" > "$FIFO_FILE" 2>&1 &
+    SSH_PID=$!
+fi
+
 error_occurred=0
 
 while IFS= read -r line; do
@@ -220,7 +223,7 @@ while IFS= read -r line; do
             echo -e "1. Скачайте 'wgcf' на этот локальный ПК." >&2
             echo -e "2. Выполните: wgcf register --accept-tos  затем  wgcf generate" >&2
             echo -e "3. Скопируйте содержимое файла wgcf-profile.conf." >&2
-            echo -e "4. На сервере создайте файл: nano /etc/sing-box/warp.conf и вставьте текст." >&2
+            echo -e "4. На сервере создайте файл: sudo nano /etc/sing-box/warp.conf и вставьте текст." >&2
             echo -e "5. Запустите этот скрипт снова.\n" >&2
         else
             printf "\n\n${RED}%s${NC}\n" "$err_msg" >&2
