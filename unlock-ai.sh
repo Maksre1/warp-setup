@@ -144,6 +144,9 @@ REMOTE_SCRIPT=$(cat << 'EOF'
 set -e
 export DEBIAN_FRONTEND=noninteractive
 
+# Перехват ошибок: отправляем в FIFO понятное сообщение
+trap 'echo "ERROR:Ошибка на сервере (строка $LINENO): $BASH_COMMAND"' ERR
+
 # Функция для обновления статуса на удаленной стороне
 status_update() {
     echo "PROGRESS:$1:$2"
@@ -169,7 +172,7 @@ else
 fi
 
 # 2. Установка sing-box
-status_update 40 "Настройка WARP"
+status_update 30 "Установка sing-box"
 if [ -f /etc/debian_version ]; then
     curl -fsSL https://sing-box.app/deb-install.sh | bash >/dev/null 2>&1
 elif [ -f /etc/redhat-release ]; then
@@ -497,6 +500,8 @@ while IFS= read -r line; do
     elif [[ "$line" == ERROR:* ]]; then
         error_occurred=1
         err_msg=$(echo "$line" | cut -d':' -f2-)
+        # Сразу выводим ошибку сервера в терминал
+        printf "\n\n${RED}%s${NC}\n" "$err_msg" >&2
     fi
 done < "$FIFO_FILE"
 
