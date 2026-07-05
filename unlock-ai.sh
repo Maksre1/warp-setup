@@ -60,18 +60,59 @@ VPS_PORT=${VPS_PORT:-22}
 read -p "[?] Имя пользователя SSH [root]: " VPS_USER
 VPS_USER=${VPS_USER:-root}
 
-echo -e "\n[i] Подключаемся к $VPS_IP..."
+# Запрос пароля (символы скрыты)
+read -s -p "[?] Пароль SSH: " VPS_PASS
+echo ""
 
-# Проверка доступности порта перед запуском SSH
-if ! nc -z -w3 "$VPS_IP" "$VPS_PORT" 2>/dev/null; then
-    # Fallback на bash-only проверку порта, если nc отсутствует
-    if ! exec 3<>/dev/tcp/"$VPS_IP"/"$VPS_PORT" 2>/dev/null; then
-        echo -e "${RED}[✗] Ошибка подключения! Сервер $VPS_IP на порту $VPS_PORT недоступен.${NC}"
-        echo -e "    Убедитесь, что IP-адрес и порт введены верно.\n"
-        exit 1
+# Проверка доступности sshpass (нужен для передачи пароля в фоновый процесс)
+if ! command -v sshpass &>/dev/null; then
+    echo -e "\n[i] Устанавливаем вспомогательный компонент (sshpass)..."
+    if [[ "$(uname)" == "Darwin" ]]; then
+        # macOS — устанавливаем через brew
+        if command -v brew &>/dev/null; then
+            brew install hudochenkov/sshpass/sshpass >/dev/null 2>&1
+        else
+            echo -e "${RED}[✗] Homebrew не найден. Установите его с brew.sh и повторите попытку.${NC}"
+            exit 1
+        fi
+    elif [ -f /etc/debian_version ]; then
+        sudo apt-get install -y sshpass >/dev/null 2>&1
+    elif [ -f /etc/redhat-release ]; then
+        sudo yum install -y sshpass >/dev/null 2>&1
     fi
-    exec 3>&-
 fi
+
+if ! command -v sshpass &>/dev/null; then
+    echo -e "${RED}[✗] Не удалось установить sshpass. Попробуйте установить его вручную.${NC}"
+    exit 1
+fi
+
+echo -e "\n[i] Проверяем подключение к $VPS_IP..."
+
+# Проверка доступности порта и корректности данных через быстрое соединение
+conn_test=$(sshpass -p "$VPS_PASS" ssh \
+    -o ConnectTimeout=10 \
+    -o StrictHostKeyChecking=no \
+    -o BatchMode=no \
+    -p "$VPS_PORT" \
+    "$VPS_USER@$VPS_IP" \
+    "echo OK" 2>&1)
+
+if [[ "$conn_test" != "OK" ]]; then
+    echo -e "${RED}[✗] Ошибка подключения!${NC}"
+    if [[ "$conn_test" == *"Permission denied"* ]] || [[ "$conn_test" == *"Authentication failed"* ]]; then
+        echo -e "    Неверный логин или пароль. Проверьте данные и повторите попытку."
+    elif [[ "$conn_test" == *"Connection refused"* ]] || [[ "$conn_test" == *"timed out"* ]]; then
+        echo -e "    Сервер $VPS_IP на порту $VPS_PORT недоступен."
+        echo -e "    Убедитесь, что IP-адрес и порт введены верно."
+    else
+        echo -e "    Детали: ${YELLOW}$conn_test${NC}"
+    fi
+    echo ""
+    exit 1
+fi
+
+echo -e "${GREEN}[✓] Успешное подключение к серверу $VPS_IP!${NC}"
 
 # Подготовка скрипта для выполнения на стороне сервера
 # Этот блок команд передается в удаленный shell
@@ -398,31 +439,32 @@ draw_progress_bar() {
 
 # Запуск SSH соединения и выполнение команд с отслеживанием прогресса
 error_occurred=0
-ssh_connected=0
+ssh_connected=1  # уже проверено выше
 
 # Временный именованный канал для сбора прогресса
 FIFO_FILE="/tmp/warp_ssh_progress_$$"
 mkfifo "$FIFO_FILE"
 
-# Запускаем SSH в фоновом режиме, перенаправляя вывод в FIFO
-ssh -o ConnectTimeout=10 -o StrictHostKeyChecking=no -p "$VPS_PORT" "$VPS_USER@$VPS_IP" "bash -s" << REMOTE_EOF > "$FIFO_FILE" 2>&1 &
-$REMOTE_SCRIPT
-REMOTE_EOF
+# Временный файл со скриптом для передачи через stdin
+TMP_SCRIPT="/tmp/warp_remote_script_$$"
+echo "$REMOTE_SCRIPT" > "$TMP_SCRIPT"
+
+# Запускаем SSH через sshpass в фоновом режиме, перенаправляя вывод в FIFO
+sshpass -p "$VPS_PASS" ssh \
+    -o ConnectTimeout=10 \
+    -o StrictHostKeyChecking=no \
+    -o BatchMode=no \
+    -p "$VPS_PORT" \
+    "$VPS_USER@$VPS_IP" \
+    "bash -s" < "$TMP_SCRIPT" > "$FIFO_FILE" 2>&1 &
 
 SSH_PID=$!
 
+echo ""
+
 # Читаем FIFO и выводим прогресс-бар
 while IFS= read -r line; do
-    # Проверяем успешность подключения (если вывод не содержит ошибок SSH)
-    if [[ "$line" == *"password"* ]] || [[ "$line" == *"Permission denied"* ]] || [[ "$line" == *"Connection timed out"* ]] || [[ "$line" == *"Connection refused"* ]]; then
-        error_occurred=1
-        err_msg="$line"
-    elif [[ "$line" == PROGRESS:* ]]; then
-        if [ "$ssh_connected" -eq 0 ]; then
-            ssh_connected=1
-            echo -e "${GREEN}[✓] Успешное подключение к серверу $VPS_IP!${NC}\n"
-        fi
-        # Парсим PROGRESS:процент:описание
+    if [[ "$line" == PROGRESS:* ]]; then
         percent=$(echo "$line" | cut -d':' -f2)
         text=$(echo "$line" | cut -d':' -f3)
         draw_progress_bar "$percent" "$text"
@@ -436,7 +478,10 @@ done < "$FIFO_FILE"
 wait $SSH_PID 2>/dev/null
 ssh_status=$?
 
-rm -f "$FIFO_FILE"
+rm -f "$FIFO_FILE" "$TMP_SCRIPT"
+
+# Очищаем пароль из памяти
+unset VPS_PASS
 
 # Обработка результатов установки
 if [ "$ssh_status" -ne 0 ] || [ "$error_occurred" -ne 0 ]; then
