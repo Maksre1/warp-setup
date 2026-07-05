@@ -60,8 +60,8 @@ VPS_PORT=${VPS_PORT:-22}
 read -p "[?] Имя пользователя SSH [root]: " VPS_USER
 VPS_USER=${VPS_USER:-root}
 
-# Запрос пароля (символы скрыты)
-read -s -p "[?] Пароль SSH: " VPS_PASS
+# Запрос пароля (виден при вводе и вставке)
+read -p "[?] Пароль SSH: " VPS_PASS
 echo ""
 
 # Проверка доступности sshpass (нужен для передачи пароля в фоновый процесс)
