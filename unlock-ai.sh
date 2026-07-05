@@ -232,12 +232,15 @@ cat << SECONF > /etc/sing-box/config.json
     "servers": [
       {
         "tag": "dns-remote",
-        "address": "https://1.1.1.1/dns-query",
+        "type": "https",
+        "server": "1.1.1.1",
+        "path": "/dns-query",
         "detour": "warp"
       },
       {
         "tag": "dns-local",
-        "address": "8.8.8.8",
+        "type": "udp",
+        "server": "8.8.8.8",
         "detour": "direct"
       }
     ],
@@ -343,6 +346,7 @@ mkdir -p /etc/systemd/system/sing-box.service.d
 cat << SYSTEMDOVER > /etc/systemd/system/sing-box.service.d/override.conf
 [Service]
 LimitNOFILE=1048576
+Environment=ENABLE_DEPRECATED_LEGACY_DNS_SERVERS=true
 SYSTEMDOVER
 
 # Перезапуск sing-box
