@@ -69,13 +69,16 @@ VPS_USER=${VPS_USER:-root}
 read -p "[?] Пароль SSH: " VPS_PASS
 echo ""
 
+# Принудительно добавляем brew-пути (macOS ARM и Intel) в PATH
+export PATH="/opt/homebrew/bin:/usr/local/bin:$PATH"
+
 # Проверка доступности sshpass (нужен для передачи пароля в фоновый процесс)
 if ! command -v sshpass &>/dev/null; then
     echo -e "\n[i] Устанавливаем вспомогательный компонент (sshpass)..."
     if [[ "$(uname)" == "Darwin" ]]; then
         # macOS — устанавливаем через brew
         if command -v brew &>/dev/null; then
-            brew install hudochenkov/sshpass/sshpass >/dev/null 2>&1
+            brew install hudochenkov/sshpass/sshpass 2>&1 | tail -1
         else
             echo -e "${RED}[✗] Homebrew не найден. Установите его с brew.sh и повторите попытку.${NC}"
             exit 1
@@ -94,16 +97,18 @@ fi
 
 echo -e "\n[i] Проверяем подключение к $VPS_IP..."
 
-# Проверка доступности порта и корректности данных через быстрое соединение
-conn_test=$(sshpass -p "$VPS_PASS" ssh \
+# Проверка подключения с явным указанием password-аутентификации
+conn_test=$(SSHPASS="$VPS_PASS" sshpass -e ssh \
     -o ConnectTimeout=10 \
     -o StrictHostKeyChecking=no \
     -o BatchMode=no \
+    -o PreferredAuthentications=password \
+    -o PubkeyAuthentication=no \
     -p "$VPS_PORT" \
     "$VPS_USER@$VPS_IP" \
     "echo OK" 2>&1)
 
-if [[ "$conn_test" != "OK" ]]; then
+if [[ "$conn_test" != *"OK"* ]]; then
     echo -e "${RED}[✗] Ошибка подключения!${NC}"
     if [[ "$conn_test" == *"Permission denied"* ]] || [[ "$conn_test" == *"Authentication failed"* ]]; then
         echo -e "    Неверный логин или пароль. Проверьте данные и повторите попытку."
@@ -455,10 +460,12 @@ TMP_SCRIPT="/tmp/warp_remote_script_$$"
 echo "$REMOTE_SCRIPT" > "$TMP_SCRIPT"
 
 # Запускаем SSH через sshpass в фоновом режиме, перенаправляя вывод в FIFO
-sshpass -p "$VPS_PASS" ssh \
+SSHPASS="$VPS_PASS" sshpass -e ssh \
     -o ConnectTimeout=10 \
     -o StrictHostKeyChecking=no \
     -o BatchMode=no \
+    -o PreferredAuthentications=password \
+    -o PubkeyAuthentication=no \
     -p "$VPS_PORT" \
     "$VPS_USER@$VPS_IP" \
     "bash -s" < "$TMP_SCRIPT" > "$FIFO_FILE" 2>&1 &
