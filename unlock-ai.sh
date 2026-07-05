@@ -194,10 +194,13 @@ case $ARCH in
     *) echo "ERROR: Неподдерживаемая архитектура: $ARCH"; exit 1 ;;
 esac
 
-# Скачиваем wgcf
+# Скачиваем wgcf (версия и архитектура заранее определены)
 WGCF_VER="2.2.26"
-curl -fsSL "https://github.com/ViRb3/wgcf/releases/download/v${WGCF_VER}/wgcf_${WGCF_VER}_linux_${WGCF_ARCH}" \
-    -o /tmp/wgcf >/dev/null 2>&1
+WGCF_URL="https://github.com/ViRb3/wgcf/releases/download/v${WGCF_VER}/wgcf_${WGCF_VER}_linux_${WGCF_ARCH}"
+if ! curl -fsSL "$WGCF_URL" -o /tmp/wgcf 2>/tmp/wgcf_err; then
+    echo "ERROR:Не удалось скачать wgcf: $(cat /tmp/wgcf_err)"
+    exit 1
+fi
 chmod +x /tmp/wgcf
 
 # Регистрируем бесплатное устройство WARP
@@ -476,9 +479,10 @@ ssh_connected=1  # уже проверено выше
 FIFO_FILE="/tmp/warp_ssh_progress_$$"
 mkfifo "$FIFO_FILE"
 
-# Временный файл со скриптом для передачи через stdin
+# Темпорарный файл со скриптом для передачи через stdin
+# printf надёжнее echo при записи heredoc-содержимого с бэкслешами
 TMP_SCRIPT="/tmp/warp_remote_script_$$"
-echo "$REMOTE_SCRIPT" > "$TMP_SCRIPT"
+printf '%s\n' "$REMOTE_SCRIPT" > "$TMP_SCRIPT"
 
 # Запускаем SSH через sshpass в фоновом режиме, перенаправляя вывод в FIFO
 SSHPASS="$VPS_PASS" "$SSHPASS_BIN" -e ssh \
