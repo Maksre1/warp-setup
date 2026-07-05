@@ -107,6 +107,10 @@ fi
 
 echo -e "\n[i] Проверяем подключение к $VPS_IP..."
 
+# Очищаем устаревший ключ хоста (если сервер переустанавливали)
+ssh-keygen -R "$VPS_IP" >/dev/null 2>&1 || true
+ssh-keygen -R "[$VPS_IP]:$VPS_PORT" >/dev/null 2>&1 || true
+
 # Проверка подключения с явным указанием password-аутентификации
 conn_test=$(SSHPASS="$VPS_PASS" "$SSHPASS_BIN" -e ssh \
     -o ConnectTimeout=10 \
