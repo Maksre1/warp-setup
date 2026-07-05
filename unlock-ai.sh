@@ -72,33 +72,43 @@ echo ""
 # Принудительно добавляем brew-пути (macOS ARM и Intel) в PATH
 export PATH="/opt/homebrew/bin:/usr/local/bin:$PATH"
 
-# Проверка доступности sshpass (нужен для передачи пароля в фоновый процесс)
-if ! command -v sshpass &>/dev/null; then
+# Проверка доступности sshpass
+SSHPASS_BIN="$(command -v sshpass 2>/dev/null)"
+
+if [ -z "$SSHPASS_BIN" ]; then
     echo -e "\n[i] Устанавливаем вспомогательный компонент (sshpass)..."
     if [[ "$(uname)" == "Darwin" ]]; then
-        # macOS — устанавливаем через brew
         if command -v brew &>/dev/null; then
-            brew install hudochenkov/sshpass/sshpass 2>&1 | tail -1
+            brew install hudochenkov/sshpass/sshpass 2>&1 | grep -v '^==>'
+            # После установки явно ищем бинарник по всем известным путям brew
+            for brew_path in "/opt/homebrew/bin/sshpass" "/usr/local/bin/sshpass"; do
+                if [ -x "$brew_path" ]; then
+                    SSHPASS_BIN="$brew_path"
+                    break
+                fi
+            done
         else
-            echo -e "${RED}[✗] Homebrew не найден. Установите его с brew.sh и повторите попытку.${NC}"
+            echo -e "${RED}[✗] Homebrew не найден. Установите его с brew.sh и повторите.${NC}"
             exit 1
         fi
     elif [ -f /etc/debian_version ]; then
         sudo apt-get install -y sshpass >/dev/null 2>&1
+        SSHPASS_BIN="$(command -v sshpass 2>/dev/null)"
     elif [ -f /etc/redhat-release ]; then
         sudo yum install -y sshpass >/dev/null 2>&1
+        SSHPASS_BIN="$(command -v sshpass 2>/dev/null)"
     fi
 fi
 
-if ! command -v sshpass &>/dev/null; then
-    echo -e "${RED}[✗] Не удалось установить sshpass. Попробуйте установить его вручную.${NC}"
+if [ -z "$SSHPASS_BIN" ] || [ ! -x "$SSHPASS_BIN" ]; then
+    echo -e "${RED}[✗] Не удалось найти sshpass. Попробуйте установить его вручную.${NC}"
     exit 1
 fi
 
 echo -e "\n[i] Проверяем подключение к $VPS_IP..."
 
 # Проверка подключения с явным указанием password-аутентификации
-conn_test=$(SSHPASS="$VPS_PASS" sshpass -e ssh \
+conn_test=$(SSHPASS="$VPS_PASS" "$SSHPASS_BIN" -e ssh \
     -o ConnectTimeout=10 \
     -o StrictHostKeyChecking=no \
     -o BatchMode=no \
@@ -116,7 +126,7 @@ if [[ "$conn_test" != *"OK"* ]]; then
         echo -e "    Сервер $VPS_IP на порту $VPS_PORT недоступен."
         echo -e "    Убедитесь, что IP-адрес и порт введены верно."
     else
-        echo -e "    Детали: ${YELLOW}$conn_test${NC}"
+        echo -e "    ${YELLOW}$conn_test${NC}"
     fi
     echo ""
     exit 1
@@ -460,7 +470,7 @@ TMP_SCRIPT="/tmp/warp_remote_script_$$"
 echo "$REMOTE_SCRIPT" > "$TMP_SCRIPT"
 
 # Запускаем SSH через sshpass в фоновом режиме, перенаправляя вывод в FIFO
-SSHPASS="$VPS_PASS" sshpass -e ssh \
+SSHPASS="$VPS_PASS" "$SSHPASS_BIN" -e ssh \
     -o ConnectTimeout=10 \
     -o StrictHostKeyChecking=no \
     -o BatchMode=no \
