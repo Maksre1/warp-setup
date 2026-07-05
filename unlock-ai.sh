@@ -286,9 +286,7 @@ cat << SECONF > /etc/sing-box/config.json
       "type": "redirect",
       "tag": "redirect-in",
       "listen": "0.0.0.0",
-      "listen_port": 12345,
-      "sniff": true,
-      "sniff_override_destination": true
+      "listen_port": 12345
     }
   ],
   "outbounds": [
@@ -318,6 +316,9 @@ cat << SECONF > /etc/sing-box/config.json
   ],
   "route": {
     "rules": [
+      {
+        "action": "sniff"
+      },
       {
         "protocol": "dns",
         "outbound": "dns-out"
